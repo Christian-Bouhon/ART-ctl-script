@@ -1,44 +1,79 @@
 /* 3dcf.ctl
  
- A CTL port of the darktable "3D Colorimetric Film" (3DCF) tone/color module
- (src/iop/3dcf.c + data/kernels/3dcf.cl) for use with ART
- (https://rawtherapee.com / ART-ctlscripts).
+A CTL port of the darktable "3D Colorimetric Film" (3DCF) tone/color module
+(src/iop/3dcf.c + data/kernels/3dcf.cl) for use with ART
+(https://rawtherapee.com / ART-ctlscripts).
+
+Copyright (C) 2026, ported by Christian Bouhon from the Libre DT-lab fork.
+Original module: Copyright (C) 2026 Libre DT-lab developers.
+https://github.com/Christian-Bouhon/libre-dt-lab/blob/main/src/iop/3dcf.c
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+---------------------------------------------------------------------------
+Acknowledgments and Technical References (Libre DT-lab):
+
+- ACES 2.0 Single-Stage Tone Scale (SSTS) : Academy Color Encoding System,
+    Michaelis-Menten parametric curve with flare compensation. The SSTS defines
+    the "texture of light" — the character of tone reproduction from scene-linear
+    to display luminance.
+    Reference: aces-core / lib / Lib.Academy.Tonescale.ctl
+
+- Spektrafilm spectral film simulation : Andrea Volpato (2024). Inspiration
+    for the spectral gamut management approach — film dye absorption naturally
+    limits chroma via smooth asymptotic roll-off in CIE xy chromaticity space,
+    preserving perceived hue while compressing out-of-gamut colors.
+    https://github.com/andreavolpato/spektrafilm
+
+- ACES 1.0 Filmic Tone Mapping Curve : Krzysztof Narkowicz (2016). Reference
+    for early tone scale work, prior to adopting ACES 2.0 SSTS.
+    https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
+
+- Bradford chromatic adaptation transform (D50 ↔ D65) : standard CAT used
+    for white point adaptation between Rec.2020 D65 and the D50 working space.
+
+- BT.1886 electro-optical transfer function : ITU-R BT.1886 reference EOTF
+    for gamma correction in the display pipeline.
+
+- CIE 1931 standard observer (XYZ colour matching functions) : foundation
+    for all spectral and colorimetric computations.
+
+- Rec.2020 colour space : ITU-R BT.2020 ultra-high definition television
+    standard, used as the working space for wide-gamut spectral processing.
+
+---------------------------------------------------------------------------
  
- Copyright (C) 2026, ported by Christian Bouhon from the Libre DT-lab fork.
-  Original module: Copyright (C) 2026 Libre DT-lab developers.
-  https://github.com/Christian-Bouhon/libre-dt-lab/blob/main/src/iop/3dcf.c
- 
- This program is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
- 
- Pipeline (mirrors dt_st_pipeline_eval() 1:1):
-   1. D50-adapted Rec.2020 RGB -> D50 XYZ
-   2. ACES 2.0 SSTS tone map on luminance Y only
-   3. BT.1886 OETF + contrast S-curve (toe/shoulder powers)
-   4. Mid-tone gamma adjustment
-   5. Chromaticity ratio scaling: x = ratio * Y
-   6. Spectral gamut: film-like chromaticity roll-off in CIE xy
-   7. XYZ -> output RGB via output matrix
-   8. Abney hue rotation + highlight desaturation
-   9. Vibrance (saturation with high-sat protection)
-  10. Chromatic contrast (luminance-adaptive mid-tone saturation boost)
-  11. Gamut compression safety net + optional output gamut protection
-  12. Color-look matrix blend
- 
-  Notes:
-  - The script receives and returns LINEAR values in the declared color
-    space ("rec2020"); 1.0 corresponds to 100 nits.  This matches the ART
-    CTL contract (see OpenDRT for ART).  No CAT is needed: ART's rec2020
-    working space is D50-adapted, same as the module's.
-  - With @ART-lut the transform is evaluated as a 64^3 LUT sampled in
-    PQ-shaper space; input values above 100 nits clamp to the LUT edge,
-    as for all ART CTL scripts.  Remove the @ART-lut line to evaluate
-    per-pixel (slower, full HDR range).
-  - The module's "HL detail recovery" (guided filter) is not portable to
-    CTL and is omitted here.
- */
+Pipeline (mirrors dt_st_pipeline_eval() 1:1):
+1. D50-adapted Rec.2020 RGB -> D50 XYZ
+2. ACES 2.0 SSTS tone map on luminance Y only
+3. BT.1886 OETF + contrast S-curve (toe/shoulder powers)
+4. Mid-tone gamma adjustment
+5. Chromaticity ratio scaling: x = ratio * Y
+6. Spectral gamut: film-like chromaticity roll-off in CIE xy
+7. XYZ -> output RGB via output matrix
+8. Abney hue rotation + highlight desaturation
+9. Vibrance (saturation with high-sat protection)
+10. Chromatic contrast (luminance-adaptive mid-tone saturation boost)
+11. Gamut compression safety net + optional output gamut protection
+12. Color-look matrix blend
+
+---------------------------------------------------------------------------
+
+Notes:
+- The script receives and returns LINEAR values in the declared color
+  space ("rec2020"); 1.0 corresponds to 100 nits.  This matches the ART
+  CTL contract (see OpenDRT for ART).  No CAT is needed: ART's rec2020
+  working space is D50-adapted, same as the module's.
+- With @ART-lut the transform is evaluated as a 64^3 LUT sampled in
+  PQ-shaper space; input values above 100 nits clamp to the LUT edge,
+  as for all ART CTL scripts.  Remove the @ART-lut line to evaluate
+  per-pixel (slower, full HDR range).
+- The module's "HL detail recovery" (guided filter) is not portable to
+  CTL and is omitted here.
+*/
 
 // @ART-label: "3D Colorimetric Film (3DCF)"
 // @ART-colorspace: "rec2020"
@@ -46,12 +81,12 @@
 
 // @ART-param: ["input_exposure", "Input exposure (EV)", -2.0, 2.0, 0.0, 0.05, "Tone"]
 // @ART-param: ["peak_luminance", "Peak luminance (%)", -100.0, 100.0, 0.0, 1.0, "Tone"]
-// @ART-param: ["contrast", "Contrast", 0.25, 4.25, 2.25, 0.01, "Tone"]
-// @ART-param: ["contrast_pivot", "Contrast pivot", 0.01, 0.99, 0.5, 0.01, "Tone"]
-// @ART-param: ["shoulder_power", "Shoulder power", 0.25, 3.0, 1.0, 0.01, "Tone"]
-// @ART-param: ["toe_power", "Toe power", 0.25, 3.0, 1.0, 0.01, "Tone"]
+// @ART-param: ["contrast", "Contrast", -2.0, 2.0, 0.0, 0.01, "Tone"]
+// @ART-param: ["contrast_pivot", "Contrast pivot", -0.49, 0.49, 0.0, 0.01, "Tone"]
+// @ART-param: ["shoulder_power", "Shoulder power", -0.75, 2.0, 0.0, 0.01, "Tone"]
+// @ART-param: ["toe_power", "Toe power", -0.75, 2.0, 0.0, 0.01, "Tone"]
 // @ART-param: ["gamma", "Gamma", -1.0, 1.0, 0.0, 0.01, "Tone"]
-// @ART-param: ["vibrance", "Vibrance", 0.0, 2.0, 1.0, 0.01, "Color"]
+// @ART-param: ["vibrance", "Vibrance", -1.0, 1.0, 0.0, 0.01, "Color"]
 // @ART-param: ["chromatic_boost", "Chromatic boost", 0.0, 1.0, 0.0, 0.01, "Color"]
 // @ART-param: ["color_look", "Color look", ["neutral", "natural look", "portrait", "vibrant", "nature", "blue sky", "soft warm", "soft", "deep cool", "authentic cinema", "bright atmosphere"], 0, "Color"]
 // @ART-param: ["look_opacity", "Look opacity", 0.0, 1.0, 1.0, 0.01, "Color"]
@@ -661,18 +696,18 @@ void ART_main(varying float r, varying float g, varying float b,
 {
     /* ---- context scalars (mirrors st_compute_context) ---- */
     float exposure_factor = st_exp2(input_exposure);
-    float c_contrast = st_fmax(contrast, 0.001);
-    float c_pivot = 1.0 - st_clamp(contrast_pivot, 0.01, 0.99);
+    float c_contrast = st_fmax(contrast + 2.25, 0.001);
+    float c_pivot = 1.0 - st_clamp(contrast_pivot + 0.5, 0.01, 0.99);
     float c_hl_desat = st_fmax(hl_desaturation, 0.0);
     float c_hl_thresh = st_fmax(hl_desat_threshold, 0.0);
     float c_hl_rotation = hl_hue_shift;
     float c_knee = st_fmax(gamut_knee, 0.0);
     float c_steep = st_fmax(gamut_steepness, 1e-6);
-    float c_toe = st_fmax(toe_power, 0.0);
-    float c_shoulder = st_fmax(shoulder_power, 0.0);
+    float c_toe = st_fmax(toe_power + 1.0, 0.0);
+    float c_shoulder = st_fmax(shoulder_power + 1.0, 0.0);
     float c_gamma = -st_clamp(gamma, -1.0, 1.0);
     float c_gamma_power = st_exp2(c_gamma);
-    float c_vib = st_fmax(vibrance, 0.0);
+    float c_vib = st_fmax(vibrance + 1.0, 0.0);
     float c_cboost = st_fmax(chromatic_boost, 0.0);
 
     int cs = output_cs;
