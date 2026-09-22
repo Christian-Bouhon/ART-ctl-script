@@ -95,18 +95,17 @@ Notes:
 // @ART-param: ["toe_power", "Toe power", -0.75, 2.0, 0.0, 0.01, "Tone"]
 // @ART-param: ["gamma", "Gamma", -1.0, 1.0, 0.0, 0.01, "Tone"]
 // @ART-param: ["color_look", "Color look", ["neutral", "natural look", "portrait", "vibrant", "nature", "blue sky", "soft warm", "soft", "deep cool", "authentic cinema", "bright atmosphere"], 0, "Color"]
+// @ART-param: ["look_opacity", "Look opacity", 0.0, 1.0, 1.0, 0.01, "Color"]
 // @ART-param: ["vibrance", "Vibrance", -1.0, 1.0, 0.0, 0.01, "Color"]
 // @ART-param: ["chromatic_boost", "Chromatic boost", 0.0, 1.0, 0.0, 0.01, "Color"]
-// @ART-param: ["look_opacity", "Look opacity", 0.0, 1.0, 1.0, 0.01, "Color"]
+// @ART-param: ["chroma_contrast", "Chroma contrast", 0.0, 10.0, 0.0, 0.01, "Color"]
+// @ART-param: ["chroma_balance", "X/Z balance", -1.0, 1.0, 0.0, 0.01, "Color"]
 // @ART-param: ["output_cs", "Target display", ["sRGB", "Rec. 2020", "Display P3", "ProPhoto RGB", "Adobe RGB"], 1, "Color"]
 // @ART-param: ["hl_hue_shift", "Abney rotation", -1.0, 1.0, 0.0, 0.01, "Highlights"]
 // @ART-param: ["hl_desaturation", "Highlight roll-off", 0.0, 1.0, 0.25, 0.01, "Highlights"]
 // @ART-param: ["hl_desat_threshold", "Desaturation threshold", 0.0, 1.0, 0.5, 0.01, "Highlights"]
 // @ART-param: ["gamut_knee", "Gamut knee", 0.0, 1.0, 0.2, 0.01, "Gamut"]
 // @ART-param: ["gamut_steepness", "Gamut steepness", 0.0, 1.0, 0.5, 0.01, "Gamut"]
-// @ART-param: ["chroma_contrast", "Chroma contrast", 0.0, 10.0, 0.0, 0.01, "Color"]
-// @ART-param: ["chroma_balance", "X/Z balance", -1.0, 1.0, 0.0, 0.01, "Color"]
-
 
 /* ------------------------- constants and tables ------------------------- */
 
