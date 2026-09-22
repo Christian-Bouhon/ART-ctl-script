@@ -44,6 +44,12 @@ Acknowledgments and Technical References (Libre DT-lab):
 - Rec.2020 colour space : ITU-R BT.2020 ultra-high definition television
     standard, used as the working space for wide-gamut spectral processing.
 
+- XYZ sigmoid curve (GIMP 3 Python plug-in) : discuss.pixls.us (2025).
+    Inspiration for the X/Z chroma contrast feature — applying independent
+    sigmoid contrast curves on the CIE X and Z chromaticity axes to steer
+    the asymmetry of the chromatic response.
+    https://discuss.pixls.us/t/python-plug-in-for-gimp3-xyz-sigmoid-curve/60096
+
 ---------------------------------------------------------------------------
  
 Pipeline (mirrors dt_st_pipeline_eval() 1:1):
@@ -52,6 +58,8 @@ Pipeline (mirrors dt_st_pipeline_eval() 1:1):
 3. BT.1886 OETF + contrast S-curve (toe/shoulder powers)
 4. Mid-tone gamma adjustment
 5. Chromaticity ratio scaling: x = ratio * Y
+5b. Chroma contrast: independent sigmoid on the CIE-xz offset from white
+    (X/Z axes only, Y untouched), applied before the spectral gamut roll-off
 6. Spectral gamut: film-like chromaticity roll-off in CIE xy
 7. XYZ -> output RGB via output matrix
 8. Abney hue rotation + highlight desaturation
@@ -86,9 +94,9 @@ Notes:
 // @ART-param: ["shoulder_power", "Shoulder power", -0.75, 2.0, 0.0, 0.01, "Tone"]
 // @ART-param: ["toe_power", "Toe power", -0.75, 2.0, 0.0, 0.01, "Tone"]
 // @ART-param: ["gamma", "Gamma", -1.0, 1.0, 0.0, 0.01, "Tone"]
+// @ART-param: ["color_look", "Color look", ["neutral", "natural look", "portrait", "vibrant", "nature", "blue sky", "soft warm", "soft", "deep cool", "authentic cinema", "bright atmosphere"], 0, "Color"]
 // @ART-param: ["vibrance", "Vibrance", -1.0, 1.0, 0.0, 0.01, "Color"]
 // @ART-param: ["chromatic_boost", "Chromatic boost", 0.0, 1.0, 0.0, 0.01, "Color"]
-// @ART-param: ["color_look", "Color look", ["neutral", "natural look", "portrait", "vibrant", "nature", "blue sky", "soft warm", "soft", "deep cool", "authentic cinema", "bright atmosphere"], 0, "Color"]
 // @ART-param: ["look_opacity", "Look opacity", 0.0, 1.0, 1.0, 0.01, "Color"]
 // @ART-param: ["output_cs", "Target display", ["sRGB", "Rec. 2020", "Display P3", "ProPhoto RGB", "Adobe RGB"], 1, "Color"]
 // @ART-param: ["hl_hue_shift", "Abney rotation", -1.0, 1.0, 0.0, 0.01, "Highlights"]
@@ -96,6 +104,8 @@ Notes:
 // @ART-param: ["hl_desat_threshold", "Desaturation threshold", 0.0, 1.0, 0.5, 0.01, "Highlights"]
 // @ART-param: ["gamut_knee", "Gamut knee", 0.0, 1.0, 0.2, 0.01, "Gamut"]
 // @ART-param: ["gamut_steepness", "Gamut steepness", 0.0, 1.0, 0.5, 0.01, "Gamut"]
+// @ART-param: ["chroma_contrast", "Chroma contrast", 0.0, 10.0, 0.0, 0.01, "Color"]
+// @ART-param: ["chroma_balance", "X/Z balance", -1.0, 1.0, 0.0, 0.01, "Color"]
 
 
 /* ------------------------- constants and tables ------------------------- */
@@ -598,6 +608,99 @@ float[2] st_spectral_gamut(float x_tm, float z_tm, float y_tm,
     return res;
 }
 
+/* Independent sigmoid contrast on the CIE-xz offset from white, applied
+   BEFORE st_spectral_gamut() so its knee compression absorbs any excursion
+   this creates. Operates on chroma normalized by the spectral locus radius
+   for the pixel's hue angle -- NOT on raw x_tm/z_tm, whose absolute scale
+   depends on y_tm and would make the contrast luminance-dependent instead
+   of saturation-dependent. Y is intentionally left untouched.
+
+   Normalization mirrors sigmoidAdj() from Ohnishi Yasuo's XYZ sigmoid curve
+   GIMP plug-in (GPLv3): the sigmoid is rescaled so f(0)=0, f(1)=1 exactly,
+   here applied per-axis to the [-1,1]-normalized chroma offset instead of
+   to a raw channel value. gain_x/z, shift_x/z, sig0_x/z and inv_range_x/z
+   are precomputed once per image in ART_main (mirrors dt_st_compute_context). */
+float[2] st_chroma_contrast_sigmoid(float x_tm, float z_tm, float y_tm,
+                                    float white_x_ratio, float white_z_ratio,
+                                    float gain_x, float shift_x, float sig0_x, float inv_range_x,
+                                    float gain_z, float shift_z, float sig0_z, float inv_range_z)
+{
+    float xr = x_tm;
+    float zr = z_tm;
+    float res[2] = { xr, zr };
+
+    if (y_tm <= 0.0) {
+        return res;
+    }
+    if (!isfinite_f(xr) || !isfinite_f(zr)) {
+        return res;
+    }
+
+    float sum = xr + y_tm + zr;
+    if (sum <= 0.0) {
+        return res;
+    }
+    float cie_x = xr / sum;
+    float cie_z = zr / sum;
+
+    float wy = 1.0;
+    float wx = white_x_ratio;
+    float wz = white_z_ratio;
+    float wsum = wx + wy + wz;
+    float white_cie_x = wx / wsum;
+    float white_cie_z = wz / wsum;
+
+    float dx = cie_x - white_cie_x;
+    float dz = cie_z - white_cie_z;
+
+    float angle_deg = atan2(dz, dx) * 57.29577951308232;
+    if (angle_deg < 0.0) {
+        angle_deg = angle_deg + 360.0;
+    }
+    if (angle_deg >= 360.0) {
+        angle_deg = angle_deg - 360.0;
+    }
+    int bin = angle_deg;
+    int next = (bin + 1) % 360;
+    float frac = angle_deg - bin;
+    float max_dist = SPECTRAL_BOUNDARY[bin]
+                   + frac * (SPECTRAL_BOUNDARY[next] - SPECTRAL_BOUNDARY[bin]);
+    if (max_dist <= 0.0) {
+        return res;
+    }
+
+    /* Normalize each axis independently to [-1, 1] by the spectral radius,
+       remap to [0, 1] for the sigmoid, then back. */
+    float u = st_clamp(dx / max_dist, -1.0, 1.0);
+    float wv = st_clamp(dz / max_dist, -1.0, 1.0);
+
+    float u01 = 0.5 * (u + 1.0);
+    float w01 = 0.5 * (wv + 1.0);
+
+    float sig_u = 1.0 / (1.0 + exp(-gain_x * (u01 - shift_x)));
+    float sig_w = 1.0 / (1.0 + exp(-gain_z * (w01 - shift_z)));
+
+    float u01_new = (sig_u - sig0_x) * inv_range_x;
+    float w01_new = (sig_w - sig0_z) * inv_range_z;
+
+    float u_new = 2.0 * u01_new - 1.0;
+    float w_new = 2.0 * w01_new - 1.0;
+
+    float cie_x_new = white_cie_x + u_new * max_dist;
+    float cie_z_new = white_cie_z + w_new * max_dist;
+    float y_new = 1.0 - cie_x_new - cie_z_new;
+
+    if (y_new > 0.0) {
+        float S_new = y_tm / y_new;
+        xr = cie_x_new * S_new;
+        zr = cie_z_new * S_new;
+    }
+
+    res[0] = xr;
+    res[1] = zr;
+    return res;
+}
+
 /* ------------------- gamut compression / protection ---------------------- */
 
 float[3] st_gamut_compress(float rgb[3], float lc[3])
@@ -692,7 +795,8 @@ void ART_main(varying float r, varying float g, varying float b,
               float peak_luminance, float input_exposure, float vibrance,
               float chromatic_boost, int output_cs, float hl_hue_shift,
               float hl_desaturation, float hl_desat_threshold, float gamut_knee,
-              float gamut_steepness, int color_look, float look_opacity)
+              float gamut_steepness, int color_look, float look_opacity,
+              float chroma_contrast, float chroma_balance)
 {
     /* ---- context scalars (mirrors st_compute_context) ---- */
     float exposure_factor = st_exp2(input_exposure);
@@ -709,6 +813,34 @@ void ART_main(varying float r, varying float g, varying float b,
     float c_gamma_power = st_exp2(c_gamma);
     float c_vib = st_fmax(vibrance + 1.0, 0.0);
     float c_cboost = st_fmax(chromatic_boost, 0.0);
+
+    /* Chroma contrast sigmoid -- precompute gain/shift/normalization per
+       axis (mirrors dt_st_compute_context()). gain guarded away from 0 to
+       avoid division by zero in the endpoint normalization; as gain -> 0
+       the normalized curve tends to identity. */
+    /* Chroma contrast sigmoid -- precompute gain/shift/normalization per
+       axis (mirrors dt_st_compute_context()). gain guarded away from 0 to
+       avoid division by zero in the endpoint normalization; as gain -> 0
+       the normalized curve tends to identity. Pivot is fixed at the neutral
+       50% position for both axes (the per-axis pivot offset of the native
+       module is a rarely-used refinement, dropped here for a 2-slider UI). */
+    float c_sx = 0.5;
+    float c_gx = st_fmax(chroma_contrast, 1e-4);
+    float c_sig0x = 1.0 / (1.0 + exp(-c_gx * (0.0 - c_sx)));
+    float c_sig1x = 1.0 / (1.0 + exp(-c_gx * (1.0 - c_sx)));
+    float c_invx = 1.0 / st_fmax(c_sig1x - c_sig0x, 1e-6);
+
+    /* Z contrast derived from the shared chroma contrast and the X/Z
+       balance, mirroring _chroma_z_from_x() of the native module:
+       b = (X-Z)/(X+Z) => Z = X*(1-b)/(1+b), clamped away from the +-1
+       singularities. balance = 0 keeps X and Z symmetric. */
+    float c_sz = 0.5;
+    float bf = st_clamp(chroma_balance, -0.999, 0.999);
+    float z_eff = st_clamp(chroma_contrast * (1.0 - bf) / (1.0 + bf), 0.0, 10.0);
+    float c_gz = st_fmax(z_eff, 1e-4);
+    float c_sig0z = 1.0 / (1.0 + exp(-c_gz * (0.0 - c_sz)));
+    float c_sig1z = 1.0 / (1.0 + exp(-c_gz * (1.0 - c_sz)));
+    float c_invz = 1.0 / st_fmax(c_sig1z - c_sig0z, 1e-6);
 
     int cs = output_cs;
     if (cs < 0 || cs > 4) {
@@ -769,6 +901,15 @@ void ART_main(varying float r, varying float g, varying float b,
 
         float x_tm = x_ratio * y_tm;
         float z_tm = z_ratio * y_tm;
+
+        /* Chroma contrast: independent sigmoid on CIE-xz offset from
+           white (X/Z axes only, Y untouched) */
+        float cc[2] = st_chroma_contrast_sigmoid(x_tm, z_tm, y_tm,
+                                                  WHITE_X_RATIO, WHITE_Z_RATIO,
+                                                  c_gx, c_sx, c_sig0x, c_invx,
+                                                  c_gz, c_sz, c_sig0z, c_invz);
+        x_tm = cc[0];
+        z_tm = cc[1];
 
         float sg[2] = st_spectral_gamut(x_tm, z_tm, y_tm, WHITE_X_RATIO,
                                         WHITE_Z_RATIO, c_knee, c_steep);
